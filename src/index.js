@@ -23,7 +23,7 @@ import {
     parseClientMessage
 } from './protocol.js';
 
-const DEFAULT_PORT = Number.parseInt(process.env.PORT ?? '8765', 10);
+const DEFAULT_PORT = Number.parseInt(process.env.PORT ?? '8039', 10);
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
