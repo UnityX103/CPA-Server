@@ -318,8 +318,24 @@ function normalizeRemoteState(state)
             totalRounds: normalizeInteger(pomodoro.totalRounds, 'INVALID_STATE'),
             isRunning: Boolean(pomodoro.isRunning)
         },
-        activeApp: state.activeApp ?? null
+        activeApp: state.activeApp ?? null,
+        bindingKey: normalizeBindingKey(state.bindingKey)
     };
+}
+
+// 见 protocol.js 同名函数：白名单 keyLabel + pressCount，null 透传，pressCount 钳到 [0, +∞)。
+// 这里和 protocol.js 同步保留两份是因为 RoomManager 是房间唯一可信源，
+// 自己也要执行一遍 normalize 防止旁路注入（其他业务模块直接调 RoomManager API 时）。
+function normalizeBindingKey(bindingKey)
+{
+    if (bindingKey == null || typeof bindingKey !== 'object')
+    {
+        return null;
+    }
+    const keyLabel = typeof bindingKey.keyLabel === 'string' ? bindingKey.keyLabel : '';
+    const rawCount = Number.isInteger(bindingKey.pressCount) ? bindingKey.pressCount : 0;
+    const pressCount = Math.max(0, rawCount);
+    return { keyLabel, pressCount };
 }
 
 function normalizeInteger(value, code)
@@ -345,7 +361,10 @@ function cloneRemoteState(state)
         },
         activeApp: state.activeApp == null
             ? null
-            : { ...state.activeApp }
+            : { ...state.activeApp },
+        bindingKey: state.bindingKey == null
+            ? null
+            : { ...state.bindingKey }
     };
 }
 

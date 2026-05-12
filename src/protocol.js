@@ -237,13 +237,29 @@ function normalizeRemoteState(state)
                 totalRounds: normalizeInteger(state?.pomodoro?.totalRounds),
                 isRunning: Boolean(state?.pomodoro?.isRunning)
             },
-            activeApp: state?.activeApp ?? null
+            activeApp: state?.activeApp ?? null,
+            bindingKey: normalizeBindingKey(state?.bindingKey)
         };
     }
     catch (error)
     {
         throw new ProtocolError('INVALID_MESSAGE', 'state 字段不合法');
     }
+}
+
+// 远端按键同步：bindingKey 为 null/undefined → 透传 null，让接收端隐藏 KeyCounterPill；
+// 非 null 时只取 { keyLabel, pressCount } 两个白名单字段，避免转发未受控字段或类型不匹配。
+// pressCount 钳到 [0, +∞)：客户端 bug 发负值不该污染对端 UI 的 tooltip / 累加逻辑。
+function normalizeBindingKey(bindingKey)
+{
+    if (bindingKey == null || typeof bindingKey !== 'object')
+    {
+        return null;
+    }
+    const keyLabel = typeof bindingKey.keyLabel === 'string' ? bindingKey.keyLabel : '';
+    const rawCount = Number.isInteger(bindingKey.pressCount) ? bindingKey.pressCount : 0;
+    const pressCount = Math.max(0, rawCount);
+    return { keyLabel, pressCount };
 }
 
 function normalizePlayers(players)

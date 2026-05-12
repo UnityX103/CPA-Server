@@ -158,6 +158,97 @@ test('两个客户端可以完成 create/join/state_update/leave 流程', async 
     assert.equal(playerLeft.playerId, roomJoined.playerId);
 });
 
+// 回归：曾经 normalizeRemoteState / cloneRemoteState 都没复制 bindingKey，
+// 服务端把字段静默丢掉 → 其他玩家面板上 PlayerCard 的 KeyCounterPill 永远不显示。
+test('player_state_broadcast 把 bindingKey 透传给其它玩家，远端按键同步可见', async (t) =>
+{
+    const app = await createPomodoroServer({
+        port: 0,
+        heartbeatIntervalMs: 5000,
+        initTimeoutMs: 1000
+    });
+    t.after(async () => { await app.close(); });
+
+    const clientA = await openClient(app.url);
+    const clientB = await openClient(app.url);
+    const inboxA = createMessageCollector(clientA);
+    const inboxB = createMessageCollector(clientB);
+    t.after(() => { clientA.close(); clientB.close(); });
+
+    sendJson(clientA, { type: 'create_room', playerName: 'A' });
+    const roomCreated = await inboxA.waitFor('room_created');
+    await inboxA.waitFor('room_snapshot');
+    sendJson(clientB, { type: 'join_room', roomCode: roomCreated.roomCode, playerName: 'B' });
+    await inboxB.waitFor('room_joined');
+    await inboxB.waitFor('room_snapshot');
+    await inboxA.waitFor('player_joined');
+
+    sendJson(clientA, {
+        type: 'player_state_update',
+        state: {
+            pomodoro: { phase: 0, remainingSeconds: 1499, currentRound: 1, totalRounds: 4, isRunning: true },
+            activeApp: null,
+            bindingKey: { keyLabel: 'Space', pressCount: 7 }
+        }
+    });
+
+    const broadcast = await inboxB.waitFor('player_state_broadcast');
+    assert.deepEqual(broadcast.state.bindingKey, { keyLabel: 'Space', pressCount: 7 });
+
+    // 取消同步：发送 bindingKey=null，B 端必须能感知（用来隐藏自己 PlayerCard 上的 pill）。
+    sendJson(clientA, {
+        type: 'player_state_update',
+        state: {
+            pomodoro: { phase: 0, remainingSeconds: 1498, currentRound: 1, totalRounds: 4, isRunning: true },
+            activeApp: null,
+            bindingKey: null
+        }
+    });
+
+    const broadcast2 = await inboxB.waitFor('player_state_broadcast');
+    assert.equal(broadcast2.state.bindingKey, null);
+});
+
+test('room_snapshot 把已有玩家的 bindingKey 透传给新进来的玩家（cloneRemoteState 路径）', async (t) =>
+{
+    const app = await createPomodoroServer({
+        port: 0,
+        heartbeatIntervalMs: 5000,
+        initTimeoutMs: 1000
+    });
+    t.after(async () => { await app.close(); });
+
+    const clientA = await openClient(app.url);
+    const inboxA = createMessageCollector(clientA);
+    t.after(() => { clientA.close(); });
+
+    sendJson(clientA, { type: 'create_room', playerName: 'A' });
+    const roomCreated = await inboxA.waitFor('room_created');
+    await inboxA.waitFor('room_snapshot');
+
+    sendJson(clientA, {
+        type: 'player_state_update',
+        state: {
+            pomodoro: { phase: 0, remainingSeconds: 1490, currentRound: 1, totalRounds: 4, isRunning: true },
+            activeApp: null,
+            bindingKey: { keyLabel: 'F', pressCount: 3 }
+        }
+    });
+
+    // 等待状态写入 RoomManager 后，新客户端 B 加入应拿到带 bindingKey 的 snapshot。
+    const clientB = await openClient(app.url);
+    const inboxB = createMessageCollector(clientB);
+    t.after(() => { clientB.close(); });
+
+    sendJson(clientB, { type: 'join_room', roomCode: roomCreated.roomCode, playerName: 'B' });
+    await inboxB.waitFor('room_joined');
+    const snapshot = await inboxB.waitFor('room_snapshot');
+
+    const playerA = snapshot.players.find((p) => p.playerName === 'A');
+    assert.ok(playerA, 'snapshot 必须包含 A');
+    assert.deepEqual(playerA.state.bindingKey, { keyLabel: 'F', pressCount: 3 });
+});
+
 test('图标流程：state_update → icon_need → icon_upload → icon_broadcast', async (t) =>
 {
     const app = await createPomodoroServer({
