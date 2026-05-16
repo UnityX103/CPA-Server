@@ -225,6 +225,14 @@ function normalizeOptionalRoomCode(roomCode)
         : '';
 }
 
+// 字符串字段最大字节数：防止恶意客户端用超长 name/bundleId/keyLabel 污染对端 UI / 内存
+// adversarial-review #1
+const MAX_STRING_FIELD_BYTES = 256;
+const MAX_PRESS_COUNT = 1_000_000_000;
+// icon_request 单次最多查询的 bundleId 数：防止恶意客户端用超长数组触发 per-item 循环
+// 与拉爆 IconCache 查询；macOS 上活跃 App 数远小于此值。adversarial-review codex follow-up
+const MAX_BUNDLE_IDS_PER_REQUEST = 100;
+
 function normalizeRemoteState(state)
 {
     try
@@ -237,7 +245,7 @@ function normalizeRemoteState(state)
                 totalRounds: normalizeInteger(state?.pomodoro?.totalRounds),
                 isRunning: Boolean(state?.pomodoro?.isRunning)
             },
-            activeApp: state?.activeApp ?? null,
+            activeApp: normalizeActiveApp(state?.activeApp),
             bindingKey: normalizeBindingKey(state?.bindingKey)
         };
     }
@@ -245,6 +253,35 @@ function normalizeRemoteState(state)
     {
         throw new ProtocolError('INVALID_MESSAGE', 'state 字段不合法');
     }
+}
+
+function normalizeActiveApp(activeApp)
+{
+    if (activeApp == null || typeof activeApp !== 'object')
+    {
+        return null;
+    }
+    const name = clampString(activeApp.name);
+    const bundleId = clampString(activeApp.bundleId);
+    const iconId = activeApp.iconId == null ? undefined : clampString(activeApp.iconId);
+    if (!name && !bundleId)
+    {
+        return null;
+    }
+    return iconId ? { name, bundleId, iconId } : { name, bundleId };
+}
+
+function clampString(value)
+{
+    if (typeof value !== 'string')
+    {
+        return '';
+    }
+    if (value.length > MAX_STRING_FIELD_BYTES)
+    {
+        return value.slice(0, MAX_STRING_FIELD_BYTES);
+    }
+    return value;
 }
 
 // 远端按键同步：bindingKey 为 null/undefined → 透传 null，让接收端隐藏 KeyCounterPill；
@@ -256,9 +293,10 @@ function normalizeBindingKey(bindingKey)
     {
         return null;
     }
-    const keyLabel = typeof bindingKey.keyLabel === 'string' ? bindingKey.keyLabel : '';
+    const keyLabel = clampString(bindingKey.keyLabel);
     const rawCount = Number.isInteger(bindingKey.pressCount) ? bindingKey.pressCount : 0;
-    const pressCount = Math.max(0, rawCount);
+    // 钳到 [0, MAX_PRESS_COUNT]：负值客户端 bug 不污染对端；上限避免对端格式化时出现 1e21 这种文本
+    const pressCount = Math.max(0, Math.min(MAX_PRESS_COUNT, rawCount));
     return { keyLabel, pressCount };
 }
 
@@ -314,7 +352,14 @@ function normalizeBundleId(bundleId)
     {
         throw new ProtocolError('INVALID_MESSAGE', 'bundleId 不能为空');
     }
-    return bundleId.trim();
+    const trimmed = bundleId.trim();
+    // bundleId 是 IconCache 的 Map key；若不在此处拒掉超长字符串，攻击者可在 100 项 LRU
+    // 装填前把每条 key 撑到 frame 上限（接近 2MiB），驻留数百 MB。
+    if (trimmed.length > MAX_STRING_FIELD_BYTES)
+    {
+        throw new ProtocolError('INVALID_MESSAGE', `bundleId 长度超过上限 ${MAX_STRING_FIELD_BYTES}`);
+    }
+    return trimmed;
 }
 
 function normalizeIconBase64(iconBase64)
@@ -332,5 +377,24 @@ function normalizeBundleIdArray(bundleIds)
     {
         throw new ProtocolError('INVALID_MESSAGE', 'bundleIds 必须是非空数组');
     }
-    return bundleIds.map((bundleId) => normalizeBundleId(bundleId));
+    if (bundleIds.length > MAX_BUNDLE_IDS_PER_REQUEST)
+    {
+        throw new ProtocolError(
+            'INVALID_MESSAGE',
+            `bundleIds 数量超过上限 ${MAX_BUNDLE_IDS_PER_REQUEST}`
+        );
+    }
+    // 去重：客户端可能在并发场景下把同一 bundleId 入两次，没必要让 IconCache 查两遍
+    const seen = new Set();
+    const result = [];
+    for (const id of bundleIds)
+    {
+        const normalized = normalizeBundleId(id);
+        if (!seen.has(normalized))
+        {
+            seen.add(normalized);
+            result.push(normalized);
+        }
+    }
+    return result;
 }

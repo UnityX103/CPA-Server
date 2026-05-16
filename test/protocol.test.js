@@ -176,3 +176,79 @@ test('player_joined 使用 players 数组携带远端玩家资料，避免新增
         ]
     });
 });
+
+// adversarial-review codex follow-up：bundleId / bundleIds 容量护栏
+// 防止恶意客户端用超长 bundleId 撑爆 IconCache key 或用超长数组拉爆 CPU。
+
+test('parseClientMessage 拒绝 icon_upload 中超长的 bundleId（防 IconCache key 撑爆）', () =>
+{
+    const oversized = 'a'.repeat(257); // MAX_STRING_FIELD_BYTES = 256
+    assert.throws(
+        () => parseClientMessage(JSON.stringify({
+            v: PROTOCOL_VERSION,
+            type: 'icon_upload',
+            bundleId: oversized,
+            iconBase64: 'YWJj'
+        })),
+        (err) => err instanceof ProtocolError && err.code === 'INVALID_MESSAGE'
+    );
+});
+
+test('parseClientMessage 接受 icon_upload 中刚好达到上限的 bundleId', () =>
+{
+    const atLimit = 'a'.repeat(256);
+    const message = parseClientMessage(JSON.stringify({
+        v: PROTOCOL_VERSION,
+        type: 'icon_upload',
+        bundleId: atLimit,
+        iconBase64: 'YWJj'
+    }));
+    assert.equal(message.bundleId.length, 256);
+});
+
+test('parseClientMessage 拒绝 icon_request 中超过 100 项的 bundleIds 数组', () =>
+{
+    const tooMany = Array.from({ length: 101 }, (_, i) => `com.example.app${i}`);
+    assert.throws(
+        () => parseClientMessage(JSON.stringify({
+            v: PROTOCOL_VERSION,
+            type: 'icon_request',
+            bundleIds: tooMany
+        })),
+        (err) => err instanceof ProtocolError && err.code === 'INVALID_MESSAGE'
+    );
+});
+
+test('parseClientMessage 接受 icon_request 中刚好 100 项的 bundleIds 数组', () =>
+{
+    const atLimit = Array.from({ length: 100 }, (_, i) => `com.example.app${i}`);
+    const message = parseClientMessage(JSON.stringify({
+        v: PROTOCOL_VERSION,
+        type: 'icon_request',
+        bundleIds: atLimit
+    }));
+    assert.equal(message.bundleIds.length, 100);
+});
+
+test('parseClientMessage 在 icon_request.bundleIds 中去重，保留首次出现的顺序', () =>
+{
+    const message = parseClientMessage(JSON.stringify({
+        v: PROTOCOL_VERSION,
+        type: 'icon_request',
+        bundleIds: ['com.a', 'com.b', 'com.a', 'com.c', 'com.b']
+    }));
+    assert.deepEqual(message.bundleIds, ['com.a', 'com.b', 'com.c']);
+});
+
+test('parseClientMessage 拒绝 icon_request.bundleIds 数组中任一超长元素', () =>
+{
+    const oversized = 'a'.repeat(257);
+    assert.throws(
+        () => parseClientMessage(JSON.stringify({
+            v: PROTOCOL_VERSION,
+            type: 'icon_request',
+            bundleIds: ['com.ok', oversized, 'com.also.ok']
+        })),
+        (err) => err instanceof ProtocolError && err.code === 'INVALID_MESSAGE'
+    );
+});

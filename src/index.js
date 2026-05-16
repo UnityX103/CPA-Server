@@ -27,6 +27,9 @@ const DEFAULT_PORT = Number.parseInt(process.env.PORT ?? '8039', 10);
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
+// 单条 WebSocket 消息最大字节数；icon_upload 走的是 base64 + 1MiB 上限，留 2MiB 以兜底协议头
+// adversarial-review #1
+const DEFAULT_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
 
 let isProcessGuardInstalled = false;
 
@@ -43,8 +46,10 @@ export async function createPomodoroServer(options = {})
         maxBase64Bytes: options.iconCacheMaxBase64Bytes ?? 1_048_576
     });
     const connections = new Map();
+    const maxPayload = options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
     const webSocketServer = new WebSocketServer({
-        port
+        port,
+        maxPayload
     });
 
     installProcessGuards(logger);
