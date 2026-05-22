@@ -326,3 +326,164 @@ test('parseClientMessage 拒绝 icon_request.bundleIds 数组中任一超长元�
         (err) => err instanceof ProtocolError && err.code === 'INVALID_MESSAGE'
     );
 });
+
+test('parseClientMessage normalizes account auth messages', () =>
+{
+    assert.deepEqual(parseClientMessage(JSON.stringify({
+        v: PROTOCOL_VERSION,
+        type: 'auth_create',
+        username: ' Alice ',
+        password: 'secret'
+    })), {
+        v: PROTOCOL_VERSION,
+        type: 'auth_create',
+        username: 'Alice',
+        password: 'secret'
+    });
+
+    assert.deepEqual(parseClientMessage(JSON.stringify({
+        v: PROTOCOL_VERSION,
+        type: 'auth_login',
+        username: 'Alice',
+        password: 'secret'
+    })), {
+        v: PROTOCOL_VERSION,
+        type: 'auth_login',
+        username: 'Alice',
+        password: 'secret'
+    });
+
+    assert.deepEqual(parseClientMessage(JSON.stringify({
+        v: PROTOCOL_VERSION,
+        type: 'auth_session',
+        token: ' token '
+    })), {
+        v: PROTOCOL_VERSION,
+        type: 'auth_session',
+        token: 'token'
+    });
+
+    assert.deepEqual(parseClientMessage(JSON.stringify({
+        v: PROTOCOL_VERSION,
+        type: 'auth_logout',
+        token: ' token '
+    })), {
+        v: PROTOCOL_VERSION,
+        type: 'auth_logout',
+        token: 'token'
+    });
+});
+
+test('parseClientMessage rejects malformed account tokens', () =>
+{
+    for (const payload of [
+        { type: 'auth_session', token: '' },
+        { type: 'auth_logout', token: '' }
+    ])
+    {
+        assert.throws(
+            () => parseClientMessage(JSON.stringify({ v: PROTOCOL_VERSION, ...payload })),
+            (error) => error instanceof ProtocolError && error.code === 'INVALID_MESSAGE'
+        );
+    }
+});
+
+test('parseClientMessage returns INVALID_ACCOUNT_INPUT for invalid auth_create credentials', () =>
+{
+    assert.throws(
+        () => parseClientMessage(JSON.stringify({
+            v: PROTOCOL_VERSION,
+            type: 'auth_create',
+            username: '',
+            password: 'secret'
+        })),
+        (error) => error instanceof ProtocolError && error.code === 'INVALID_ACCOUNT_INPUT'
+    );
+});
+
+test('parseClientMessage returns INVALID_ACCOUNT_INPUT for invalid auth_login credentials', () =>
+{
+    assert.throws(
+        () => parseClientMessage(JSON.stringify({
+            v: PROTOCOL_VERSION,
+            type: 'auth_login',
+            username: 'Alice',
+            password: ''
+        })),
+        (error) => error instanceof ProtocolError && error.code === 'INVALID_ACCOUNT_INPUT'
+    );
+});
+
+test('auth response helpers encode auth_ok and auth_logged_out', async () =>
+{
+    const { createAuthOkMessage, createAuthLoggedOutMessage } = await import('../src/protocol.js');
+    assert.deepEqual(JSON.parse(encodeMessage(createAuthOkMessage({
+        user: { userId: 'u1', username: 'Alice' },
+        token: 'token'
+    }))), {
+        v: PROTOCOL_VERSION,
+        type: 'auth_ok',
+        user: { userId: 'u1', username: 'Alice' },
+        token: 'token'
+    });
+    assert.deepEqual(JSON.parse(encodeMessage(createAuthLoggedOutMessage())), {
+        v: PROTOCOL_VERSION,
+        type: 'auth_logged_out'
+    });
+});
+
+test('parseClientMessage accepts user_data_get', () =>
+{
+    const message = parseClientMessage(JSON.stringify({
+        v: PROTOCOL_VERSION,
+        type: 'user_data_get'
+    }));
+
+    assert.deepEqual(message, { v: PROTOCOL_VERSION, type: 'user_data_get' });
+});
+
+test('parseClientMessage accepts user_data_save with baseUpdatedAt', () =>
+{
+    const message = parseClientMessage(JSON.stringify({
+        v: PROTOCOL_VERSION,
+        type: 'user_data_save',
+        baseUpdatedAt: 1779360000000,
+        data: {
+            schemaVersion: 1,
+            pomodoro: {
+                focusDurationSeconds: 1500,
+                breakDurationSeconds: 300,
+                totalRounds: 4,
+                autoStartBreak: false,
+                endActionMode: 'playVideo',
+                endActionVideo: { sourceKind: 'builtin', builtinVideoId: 'default', customVideoPath: '' }
+            },
+            settings: {
+                uiScale: 1,
+                showActiveAppWindowTitle: true,
+                autostartEnabled: false,
+                autoPinOnFocusEnd: true
+            },
+            checkin: {
+                weeklyPlan: {
+                    weekStartDate: '2026-05-18',
+                    carryToNextWeek: true,
+                    days: {
+                        mon: { kind: 'items', items: [] },
+                        tue: { kind: 'inherit' },
+                        wed: { kind: 'inherit' },
+                        thu: { kind: 'inherit' },
+                        fri: { kind: 'inherit' },
+                        sat: { kind: 'inherit' },
+                        sun: { kind: 'rest' }
+                    }
+                },
+                dailyRecords: {}
+            }
+        }
+    }));
+
+    assert.equal(message.type, 'user_data_save');
+    assert.equal(message.baseUpdatedAt, 1779360000000);
+    assert.equal(message.data.schemaVersion, 1);
+});

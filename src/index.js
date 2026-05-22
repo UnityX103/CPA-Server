@@ -3,13 +3,17 @@ import { pathToFileURL } from 'node:url';
 
 import { WebSocketServer } from 'ws';
 
+import { AuthStore, AuthStoreError } from './AuthStore.js';
 import { IconCache, IconCacheError } from './IconCache.js';
 import {
     RoomManager,
     RoomManagerError
 } from './RoomManager.js';
+import { UserDataStore, UserDataStoreError } from './UserDataStore.js';
 import {
     ProtocolError,
+    createAuthLoggedOutMessage,
+    createAuthOkMessage,
     createErrorMessage,
     createIconBroadcastMessage,
     createIconNeedMessage,
@@ -19,6 +23,8 @@ import {
     createRoomCreatedMessage,
     createRoomJoinedMessage,
     createRoomSnapshotMessage,
+    createUserDataSavedMessage,
+    createUserDataSnapshotMessage,
     encodeMessage,
     parseClientMessage
 } from './protocol.js';
@@ -41,6 +47,12 @@ export async function createPomodoroServer(options = {})
     const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
     const logger = options.logger ?? console;
     const roomManager = options.roomManager ?? new RoomManager();
+    const authStore = options.authStore ?? new AuthStore({
+        filePath: options.authFilePath
+    });
+    const userDataStore = options.userDataStore ?? new UserDataStore({
+        filePath: options.userDataFilePath
+    });
     const iconCache = options.iconCache ?? new IconCache({
         maxEntries: options.iconCacheMaxEntries ?? 100,
         maxBase64Bytes: options.iconCacheMaxBase64Bytes ?? 1_048_576
@@ -61,6 +73,9 @@ export async function createPomodoroServer(options = {})
             roomCode: null,
             playerId: null,
             playerName: null,
+            userId: null,
+            username: null,
+            authToken: null,
             lastSeenAt: Date.now(),
             initTimerId: setTimeout(() =>
             {
@@ -73,11 +88,11 @@ export async function createPomodoroServer(options = {})
 
         socket.on('message', (rawMessage) =>
         {
-            try
-            {
-                handleMessage({
+            void handleMessage({
                     rawMessage,
                     connection,
+                    authStore,
+                    userDataStore,
                     roomManager,
                     iconCache,
                     logger,
@@ -91,12 +106,11 @@ export async function createPomodoroServer(options = {})
                             roomManager
                         });
                     }
+                })
+                .catch((error) =>
+                {
+                    handleKnownError(socket, error, logger);
                 });
-            }
-            catch (error)
-            {
-                handleKnownError(socket, error, logger);
-            }
         });
 
         socket.on('pong', () =>
@@ -191,7 +205,7 @@ function clearConnectionInitTimeout(connection)
     connection.initTimerId = null;
 }
 
-function handleMessage(context)
+async function handleMessage(context)
 {
     const rawText = Buffer.isBuffer(context.rawMessage)
         ? context.rawMessage.toString('utf8')
@@ -204,6 +218,30 @@ function handleMessage(context)
 
     switch (message.type)
     {
+        case 'auth_create':
+            await handleAuthCreate(message, context);
+            return;
+
+        case 'auth_login':
+            await handleAuthLogin(message, context);
+            return;
+
+        case 'auth_session':
+            await handleAuthSession(message, context);
+            return;
+
+        case 'auth_logout':
+            await handleAuthLogout(message, context);
+            return;
+
+        case 'user_data_get':
+            await handleUserDataGet(context);
+            return;
+
+        case 'user_data_save':
+            await handleUserDataSave(message, context);
+            return;
+
         case 'create_room':
             handleCreateRoom(message, context);
             return;
@@ -239,6 +277,7 @@ function handleMessage(context)
 
 function handleCreateRoom(message, context)
 {
+    ensureAuthenticated(context.connection);
     ensureConnectionNotInRoom(context.connection);
 
     const playerId = randomUUID();
@@ -266,6 +305,7 @@ function handleCreateRoom(message, context)
 
 function handleJoinRoom(message, context)
 {
+    ensureAuthenticated(context.connection);
     ensureConnectionNotInRoom(context.connection);
 
     const playerId = randomUUID();
@@ -302,6 +342,77 @@ function handleJoinRoom(message, context)
         }),
         playerId
     );
+}
+
+async function handleAuthCreate(message, context)
+{
+    const result = await context.authStore.createAccount({
+        username: message.username,
+        password: message.password
+    });
+    sendAuthOk(context, result);
+}
+
+async function handleAuthLogin(message, context)
+{
+    const result = await context.authStore.login({
+        username: message.username,
+        password: message.password
+    });
+    sendAuthOk(context, result);
+}
+
+async function handleAuthSession(message, context)
+{
+    const result = await context.authStore.restoreSession({
+        token: message.token
+    });
+    sendAuthOk(context, result);
+}
+
+async function handleAuthLogout(message, context)
+{
+    await context.authStore.logout({
+        token: message.token
+    });
+    leaveCurrentRoom({
+        connection: context.connection,
+        roomManager: context.roomManager,
+        notifyOthers: true
+    });
+    context.connection.userId = null;
+    context.connection.username = null;
+    context.connection.authToken = null;
+    safeSend(context.connection.socket, createAuthLoggedOutMessage());
+}
+
+function sendAuthOk(context, result)
+{
+    context.connection.userId = result.user.userId;
+    context.connection.username = result.user.username;
+    context.connection.authToken = result.token;
+    context.clearInitTimeout();
+    safeSend(context.connection.socket, createAuthOkMessage(result));
+}
+
+async function handleUserDataGet(context)
+{
+    ensureAuthenticated(context.connection);
+    const data = await context.userDataStore.getUserData(context.connection.userId);
+    safeSend(context.connection.socket, createUserDataSnapshotMessage({ data }));
+}
+
+async function handleUserDataSave(message, context)
+{
+    ensureAuthenticated(context.connection);
+    const saved = await context.userDataStore.saveUserData({
+        userId: context.connection.userId,
+        data: message.data,
+        baseUpdatedAt: message.baseUpdatedAt
+    });
+    safeSend(context.connection.socket, createUserDataSavedMessage({
+        updatedAt: saved.updatedAt
+    }));
 }
 
 function handleLeaveRoom(context)
@@ -471,6 +582,16 @@ function safeSend(socket, message)
 function handleKnownError(socket, error, logger)
 {
     logger.warn?.('[Server] Request failed:', error);
+    if (error instanceof AuthStoreError)
+    {
+        safeSend(socket, createErrorMessage(error.code));
+        return;
+    }
+    if (error instanceof UserDataStoreError)
+    {
+        safeSend(socket, createErrorMessage(error.code));
+        return;
+    }
     safeSend(socket, createErrorMessage(error));
 
     if (error instanceof ProtocolError && error.code === 'INVALID_VERSION')
@@ -484,6 +605,14 @@ function ensureConnectionNotInRoom(connection)
     if (connection.roomCode || connection.playerId)
     {
         throw new ProtocolError('ALREADY_IN_ROOM', '连接已在房间中');
+    }
+}
+
+function ensureAuthenticated(connection)
+{
+    if (!connection.userId)
+    {
+        throw new ProtocolError('AUTH_REQUIRED', '请先登录');
     }
 }
 
